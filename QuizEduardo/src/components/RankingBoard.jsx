@@ -1,44 +1,55 @@
 import React, { useState, useEffect } from 'react';
-import { Trophy, Search, RefreshCw, Award, Users, GraduationCap, Presentation, RotateCcw } from 'lucide-react';
-import { getTopScores } from '../firebase';
+import { Trophy, Search, RefreshCw, Award, Users, GraduationCap, Presentation, RotateCcw, Radio } from 'lucide-react';
+import { subscribeToTopScores } from '../firebase';
 
 export default function RankingBoard({ currentUserScoreId, onRestart }) {
-  const [scores, setScores]       = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState('geral');
+  const [scores, setScores]           = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [searchTerm, setSearchTerm]   = useState('');
+  const [activeTab, setActiveTab]     = useState('geral');
+  const [lastUpdated, setLastUpdated] = useState(null);
 
-  const fetchScores = async () => {
+  useEffect(() => {
     setLoading(true);
-    try {
-      setScores(await getTopScores());
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
 
-  useEffect(() => { fetchScores(); }, []);
+    // Inicia listener em tempo real — atualiza automaticamente para todos os dispositivos
+    const unsubscribe = subscribeToTopScores((data) => {
+      setScores(data);
+      setLoading(false);
+      setLastUpdated(new Date());
+    });
+
+    // Cancela o listener quando o componente for desmontado
+    return () => unsubscribe();
+  }, []);
 
   const fmtTime = (s) => {
     if (isNaN(s) || s == null) return '--:--';
     return `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(Math.floor(s % 60)).padStart(2,'0')}`;
   };
 
-  const filtered = scores.filter(r => {
-    if (activeTab === 'aluno'    && r.role !== 'aluno')     return false;
-    if (activeTab === 'professor'&& r.role !== 'professor') return false;
+  const fmtLastUpdated = (date) => {
+    if (!date) return '';
+    return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  // ─── Calcula a posição global ANTES de filtrar por aba ───────────────────────
+  // Isso garante que o "3º geral" continue mostrando posição 3 mesmo na aba Alunos
+  const scoresWithGlobalRank = scores.map((r, i) => ({ ...r, globalRank: i + 1 }));
+
+  // ─── Filtra por aba e por busca ──────────────────────────────────────────────
+  const filtered = scoresWithGlobalRank.filter(r => {
+    if (activeTab === 'aluno'     && r.role !== 'aluno')     return false;
+    if (activeTab === 'professor' && r.role !== 'professor') return false;
     const q = searchTerm.toLowerCase();
     return (r.name?.toLowerCase().includes(q) || r.class?.toLowerCase().includes(q));
   });
 
-  const badge = (i) => {
-    const n = i + 1;
-    if (n === 1) return <span className="rank-badge rank-gold"  title="1º">1</span>;
-    if (n === 2) return <span className="rank-badge rank-silver" title="2º">2</span>;
-    if (n === 3) return <span className="rank-badge rank-bronze" title="3º">3</span>;
-    return <span className="rank-badge rank-default">{n}</span>;
+  const badge = (rank) => {
+    if (rank === 1) return <span className="rank-badge rank-gold"   title="1º">1</span>;
+    if (rank === 2) return <span className="rank-badge rank-silver" title="2º">2</span>;
+    if (rank === 3) return <span className="rank-badge rank-bronze" title="3º">3</span>;
+    return <span className="rank-badge rank-default">{rank}</span>;
   };
 
   return (
@@ -51,20 +62,28 @@ export default function RankingBoard({ currentUserScoreId, onRestart }) {
             <Trophy size={14} /> Ranking Global
           </div>
         </div>
-        <button
-          className="btn-icon"
-          onClick={fetchScores}
-          disabled={loading}
-          title="Atualizar ranking"
-          id="btn-rank-refresh"
-        >
-          <RefreshCw size={15} className={loading ? 'spin-anim' : ''} />
-        </button>
+
+        {/* Indicador ao vivo */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.4rem',
+          fontSize: '0.72rem',
+          color: 'var(--text-muted)',
+          fontFamily: 'var(--font-secondary)',
+        }}>
+          <Radio size={13} style={{ color: '#22c55e' }} />
+          <span style={{ color: '#22c55e', fontWeight: 600 }}>Ao vivo</span>
+          {lastUpdated && (
+            <span style={{ opacity: 0.6 }}>· {fmtLastUpdated(lastUpdated)}</span>
+          )}
+        </div>
       </div>
 
       <h1 className="page-title" style={{ fontSize: '1.75rem' }}>Quadro de Líderes</h1>
       <p className="page-subtitle" style={{ marginBottom: '1.75rem' }}>
         Os 500 melhores resultados da Feira de Ciências, ordenados por pontuação e tempo.
+        Atualiza em tempo real para todos os dispositivos.
       </p>
 
       {/* Search */}
@@ -83,9 +102,9 @@ export default function RankingBoard({ currentUserScoreId, onRestart }) {
       {/* Tabs */}
       <div className="ranking-tabs">
         {[
-          { key: 'geral',    label: 'Geral',       icon: <Users size={13}/> },
-          { key: 'aluno',    label: 'Alunos',      icon: <GraduationCap size={13}/> },
-          { key: 'professor',label: 'Professores',  icon: <Presentation size={13}/> },
+          { key: 'geral',     label: 'Geral',       icon: <Users size={13}/> },
+          { key: 'aluno',     label: 'Alunos',      icon: <GraduationCap size={13}/> },
+          { key: 'professor', label: 'Professores',  icon: <Presentation size={13}/> },
         ].map(t => (
           <button
             key={t.key}
@@ -121,11 +140,13 @@ export default function RankingBoard({ currentUserScoreId, onRestart }) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((r, i) => {
-                const isCurrent = r.id === currentUserScoreId;
+              {filtered.map((r) => {
+                // Usa o ID real do Firestore para marcar o jogador atual
+                const isCurrent = currentUserScoreId && r.id === currentUserScoreId;
                 return (
                   <tr key={r.id} className={isCurrent ? 'current-user-row' : ''}>
-                    <td>{badge(i)}</td>
+                    {/* Posição global — igual em todas as abas */}
+                    <td>{badge(r.globalRank)}</td>
                     <td>
                       <div style={{ display:'flex', alignItems:'center', gap:'0.5rem' }}>
                         <span style={{ fontWeight: isCurrent ? 700 : 500, color: 'var(--text-primary)' }}>
@@ -167,7 +188,7 @@ export default function RankingBoard({ currentUserScoreId, onRestart }) {
       </button>
 
       <div className="footer-note">
-        Ranking atualizado em tempo real via Firebase • Top 500 jogadores
+        🔴 Ranking ao vivo via Firebase • Top 500 jogadores • O mesmo ranking em todos os dispositivos
       </div>
     </div>
   );

@@ -13,7 +13,8 @@ import {
   limit, 
   getDoc,
   setDoc,
-  increment
+  increment,
+  onSnapshot
 } from "firebase/firestore";
 
 // Insira as credenciais do seu Firebase aqui. 
@@ -271,6 +272,88 @@ export const getTopScores = async () => {
     }
   } else {
     return getLocalScores().slice(0, 500);
+  }
+};
+
+/**
+ * Escuta em tempo real os 500 melhores jogadores.
+ * Retorna a função de unsubscribe — chame-a no cleanup do useEffect.
+ *
+ * @param {function} callback - Chamada com o array atualizado de scores sempre que houver mudança.
+ * @returns {function} unsubscribe
+ */
+export const subscribeToTopScores = (callback) => {
+  if (!isFirebaseActive) {
+    // Modo offline: retorna os dados locais uma única vez e simula o padrão de subscribe
+    callback(getLocalScores().slice(0, 500));
+    return () => {}; // no-op unsubscribe
+  }
+
+  // Tenta a query com índice composto (score desc + timeTaken asc)
+  const buildResults = (snapshot) => {
+    const results = [];
+    snapshot.forEach((d) => {
+      const data = d.data();
+      results.push({
+        id: d.id,
+        ...data,
+        createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
+      });
+    });
+    return results;
+  };
+
+  try {
+    const q = query(
+      collection(db, "ranking"),
+      orderBy("score", "desc"),
+      orderBy("timeTaken", "asc"),
+      limit(500)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const results = buildResults(snapshot);
+        console.log(`🔴 Ranking atualizado em tempo real: ${results.length} registros`);
+        callback(results);
+      },
+      (error) => {
+        // Índice composto ausente — tenta query mais simples com onSnapshot
+        console.warn("⚠️ onSnapshot com índice composto falhou. Tentando sem timeTaken...", error.message);
+
+        try {
+          const q2 = query(
+            collection(db, "ranking"),
+            orderBy("score", "desc"),
+            limit(500)
+          );
+          return onSnapshot(
+            q2,
+            (snapshot2) => {
+              const results2 = buildResults(snapshot2);
+              results2.sort((a, b) =>
+                b.score !== a.score ? b.score - a.score : (a.timeTaken ?? Infinity) - (b.timeTaken ?? Infinity)
+              );
+              callback(results2);
+            },
+            (err2) => {
+              console.error("❌ onSnapshot falhou totalmente:", err2.message);
+              callback(getLocalScores().slice(0, 500));
+            }
+          );
+        } catch (e) {
+          callback(getLocalScores().slice(0, 500));
+          return () => {};
+        }
+      }
+    );
+
+    return unsubscribe;
+  } catch (e) {
+    console.error("❌ Erro ao criar listener do ranking:", e.message);
+    callback(getLocalScores().slice(0, 500));
+    return () => {};
   }
 };
 
