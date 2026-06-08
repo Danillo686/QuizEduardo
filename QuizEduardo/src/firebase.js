@@ -196,10 +196,13 @@ export const saveScore = async (name, role, userClass, score, timeTaken) => {
 };
 
 /**
- * Retorna os 500 melhores jogadores ordenados por pontuação desc e tempo asc
+ * Retorna os 500 melhores jogadores ordenados por pontuação desc e tempo asc.
+ * Tenta primeiro a query composta (requer índice no Firestore). Se falhar por
+ * ausência de índice, busca sem ordenação e ordena no cliente.
  */
 export const getTopScores = async () => {
   if (isFirebaseActive) {
+    // Tentativa 1: query com índice composto (score desc + timeTaken asc)
     try {
       const q = query(
         collection(db, "ranking"),
@@ -209,19 +212,62 @@ export const getTopScores = async () => {
       );
       const querySnapshot = await withTimeout(getDocs(q));
       const results = [];
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
+      querySnapshot.forEach((d) => {
+        const data = d.data();
         results.push({
-          id: doc.id,
+          id: d.id,
           ...data,
-          // Trata timestamp do Firebase para formato legível no React
           createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
         });
       });
+      console.log(`✅ Ranking carregado do Firebase: ${results.length} registros`);
       return results;
     } catch (e) {
-      console.warn("Erro ao ler do Firebase, carregando ranking local: ", e.message);
-      return getLocalScores().slice(0, 500);
+      // Tentativa 2: busca sem índice composto, ordena no cliente
+      // Isso acontece quando o índice composto não foi criado no Firestore.
+      console.warn("⚠️ Índice composto não encontrado ou erro na query. Tentando busca simples...", e.message);
+      try {
+        const q2 = query(
+          collection(db, "ranking"),
+          orderBy("score", "desc"),
+          limit(500)
+        );
+        const snapshot2 = await withTimeout(getDocs(q2));
+        const results2 = [];
+        snapshot2.forEach((d) => {
+          const data = d.data();
+          results2.push({
+            id: d.id,
+            ...data,
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
+          });
+        });
+        // Ordena por pontuação desc, depois tempo asc (client-side)
+        results2.sort((a, b) => b.score !== a.score ? b.score - a.score : (a.timeTaken ?? Infinity) - (b.timeTaken ?? Infinity));
+        console.log(`✅ Ranking carregado (ordenação local): ${results2.length} registros`);
+        return results2;
+      } catch (e2) {
+        // Tentativa 3: busca sem nenhuma ordenação
+        console.warn("⚠️ Falha na query simples. Tentando busca sem orderBy...", e2.message);
+        try {
+          const snapshot3 = await withTimeout(getDocs(collection(db, "ranking")));
+          const results3 = [];
+          snapshot3.forEach((d) => {
+            const data = d.data();
+            results3.push({
+              id: d.id,
+              ...data,
+              createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
+            });
+          });
+          results3.sort((a, b) => b.score !== a.score ? b.score - a.score : (a.timeTaken ?? Infinity) - (b.timeTaken ?? Infinity));
+          console.log(`✅ Ranking carregado (sem índice): ${results3.length} registros`);
+          return results3;
+        } catch (e3) {
+          console.error("❌ Erro ao ler ranking do Firebase:", e3.message);
+          return getLocalScores().slice(0, 500);
+        }
+      }
     }
   } else {
     return getLocalScores().slice(0, 500);

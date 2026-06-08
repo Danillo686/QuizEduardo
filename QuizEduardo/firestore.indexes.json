@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "ranking",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "score",     "order": "DESCENDING" },
+        { "fieldPath": "timeTaken", "order": "ASCENDING"  }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
