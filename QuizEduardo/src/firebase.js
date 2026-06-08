@@ -9,6 +9,7 @@ import {
   deleteDoc, 
   query, 
   orderBy, 
+  where,
   limit, 
   getDoc,
   setDoc,
@@ -51,6 +52,23 @@ if (isValidConfig) {
 }
 
 // ==========================================
+// TIMEOUT HELPER (guard against ad-blocker blocks)
+// ==========================================
+
+/**
+ * Races a Firebase promise against a timeout.
+ * If Firebase doesn't resolve within `ms` milliseconds (e.g. blocked by an
+ * ad-blocker), the returned promise rejects so callers can fall back to
+ * LocalStorage immediately instead of hanging the UI.
+ */
+const withTimeout = (promise, ms = 4000) => {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`Firebase timeout after ${ms}ms`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+};
+
+// ==========================================
 // MOCK LOCALSTORAGE IMPLEMENTATION (FALLBACK)
 // ==========================================
 
@@ -61,25 +79,42 @@ const getLocalScores = () => {
 
 const saveLocalScore = (name, role, userClass, score, timeTaken) => {
   const scores = getLocalScores();
+  const resolvedClass = role === "aluno" ? userClass : "";
+  const newScore = parseInt(score, 10);
+  const newTime  = parseFloat(timeTaken);
+
+  // Upsert: procura registro existente com mesmo nome + turma + função
+  const existingIdx = scores.findIndex(
+    s => s.name?.toLowerCase() === name?.toLowerCase() &&
+         s.role === role &&
+         (role !== 'aluno' || s.class?.toLowerCase() === resolvedClass?.toLowerCase())
+  );
+
+  if (existingIdx !== -1) {
+    const existing = scores[existingIdx];
+    // Atualiza apenas se a nova pontuação for melhor (mais pontos, ou mesmo pontos em menos tempo)
+    const isBetter = newScore > existing.score ||
+                     (newScore === existing.score && newTime < existing.timeTaken);
+    if (isBetter) {
+      scores[existingIdx] = { ...existing, score: newScore, timeTaken: newTime };
+    }
+    scores.sort((a, b) => b.score !== a.score ? b.score - a.score : a.timeTaken - b.timeTaken);
+    localStorage.setItem("quiz_ranking", JSON.stringify(scores));
+    return scores[existingIdx !== -1 ? scores.findIndex(s => s.id === existing.id) : 0];
+  }
+
+  // Novo registro
   const newRecord = {
     id: "local_" + Math.random().toString(36).substr(2, 9),
     name,
     role,
-    class: role === "aluno" ? userClass : "",
-    score: parseInt(score, 10),
-    timeTaken: parseFloat(timeTaken),
+    class: resolvedClass,
+    score: newScore,
+    timeTaken: newTime,
     createdAt: new Date().toISOString()
   };
-  
   scores.push(newRecord);
-  // Ordenar por pontos (descendente) e tempo (ascendente)
-  scores.sort((a, b) => {
-    if (b.score !== a.score) {
-      return b.score - a.score;
-    }
-    return a.timeTaken - b.timeTaken;
-  });
-  
+  scores.sort((a, b) => b.score !== a.score ? b.score - a.score : a.timeTaken - b.timeTaken);
   localStorage.setItem("quiz_ranking", JSON.stringify(scores));
   return newRecord;
 };
@@ -102,23 +137,57 @@ const incrementLocalAccessCount = () => {
 export { isFirebaseActive };
 
 /**
- * Registra a pontuação do jogador
+ * Registra (ou atualiza) a pontuação do jogador.
+ * Upsert: se já existir um registro com mesmo nome + turma + função,
+ * atualiza somente se o novo resultado for melhor. Caso contrário, mantém o antigo.
  */
 export const saveScore = async (name, role, userClass, score, timeTaken) => {
+  const resolvedClass = role === "aluno" ? userClass : "";
+  const newScore = parseInt(score, 10);
+  const newTime  = parseFloat(timeTaken);
+
   if (isFirebaseActive) {
     try {
+      // Busca registro existente com mesmo nome + turma + função
+      const q = query(
+        collection(db, "ranking"),
+        where("name", "==", name),
+        where("role", "==", role),
+        where("class", "==", resolvedClass)
+      );
+      const existing = await withTimeout(getDocs(q));
+
+      if (!existing.empty) {
+        // Já existe: verifica se o novo resultado é melhor
+        const existingDoc = existing.docs[0];
+        const existingData = existingDoc.data();
+        const isBetter = newScore > existingData.score ||
+                         (newScore === existingData.score && newTime < existingData.timeTaken);
+
+        if (isBetter) {
+          await withTimeout(updateDoc(doc(db, "ranking", existingDoc.id), {
+            score: newScore,
+            timeTaken: newTime,
+            updatedAt: new Date()
+          }));
+        }
+        // Retorna o documento existente (atualizado ou não)
+        return { id: existingDoc.id, ...existingData, score: isBetter ? newScore : existingData.score, timeTaken: isBetter ? newTime : existingData.timeTaken };
+      }
+
+      // Nenhum registro existente: cria novo
       const data = {
         name,
         role,
-        class: role === "aluno" ? userClass : "",
-        score: parseInt(score, 10),
-        timeTaken: parseFloat(timeTaken),
+        class: resolvedClass,
+        score: newScore,
+        timeTaken: newTime,
         createdAt: new Date()
       };
-      const docRef = await addDoc(collection(db, "ranking"), data);
+      const docRef = await withTimeout(addDoc(collection(db, "ranking"), data));
       return { id: docRef.id, ...data };
     } catch (e) {
-      console.error("Erro ao salvar no Firebase, tentando salvar localmente: ", e);
+      console.warn("Erro ao salvar no Firebase, salvando localmente: ", e.message);
       return saveLocalScore(name, role, userClass, score, timeTaken);
     }
   } else {
@@ -138,7 +207,7 @@ export const getTopScores = async () => {
         orderBy("timeTaken", "asc"),
         limit(500)
       );
-      const querySnapshot = await getDocs(q);
+      const querySnapshot = await withTimeout(getDocs(q));
       const results = [];
       querySnapshot.forEach((doc) => {
         const data = doc.data();
@@ -151,7 +220,7 @@ export const getTopScores = async () => {
       });
       return results;
     } catch (e) {
-      console.error("Erro ao ler do Firebase, carregando ranking local: ", e);
+      console.warn("Erro ao ler do Firebase, carregando ranking local: ", e.message);
       return getLocalScores().slice(0, 500);
     }
   } else {
@@ -167,16 +236,16 @@ export const incrementAccessCount = async () => {
     try {
       const docRef = doc(db, "analytics", "global");
       // Verifica se o documento de estatísticas existe primeiro
-      const docSnap = await getDoc(docRef);
+      const docSnap = await withTimeout(getDoc(docRef));
       if (!docSnap.exists()) {
-        await setDoc(docRef, { accessCount: 1 });
+        await withTimeout(setDoc(docRef, { accessCount: 1 }));
       } else {
-        await updateDoc(docRef, {
+        await withTimeout(updateDoc(docRef, {
           accessCount: increment(1)
-        });
+        }));
       }
     } catch (e) {
-      console.error("Erro ao incrementar acessos no Firebase: ", e);
+      console.warn("Erro ao incrementar acessos no Firebase: ", e.message);
       incrementLocalAccessCount();
     }
   } else {
@@ -191,13 +260,13 @@ export const getAccessCount = async () => {
   if (isFirebaseActive) {
     try {
       const docRef = doc(db, "analytics", "global");
-      const docSnap = await getDoc(docRef);
+      const docSnap = await withTimeout(getDoc(docRef));
       if (docSnap.exists()) {
         return docSnap.data().accessCount || 0;
       }
       return 0;
     } catch (e) {
-      console.error("Erro ao obter acessos do Firebase: ", e);
+      console.warn("Erro ao obter acessos do Firebase: ", e.message);
       return getLocalAccessCount();
     }
   } else {
@@ -212,16 +281,15 @@ export const updateScoreRecord = async (id, updatedData) => {
   if (isFirebaseActive) {
     try {
       const docRef = doc(db, "ranking", id);
-      await updateDoc(docRef, {
+      await withTimeout(updateDoc(docRef, {
         name: updatedData.name,
         class: updatedData.class || "",
         score: parseInt(updatedData.score, 10),
         timeTaken: parseFloat(updatedData.timeTaken)
-      });
+      }));
       return true;
     } catch (e) {
-      console.error("Erro ao atualizar no Firebase: ", e);
-      // Fallback local
+      console.warn("Erro ao atualizar no Firebase: ", e.message);
       return updateLocalRecord(id, updatedData);
     }
   } else {
@@ -257,14 +325,35 @@ export const deleteScoreRecord = async (id) => {
   if (isFirebaseActive) {
     try {
       const docRef = doc(db, "ranking", id);
-      await deleteDoc(docRef);
+      await withTimeout(deleteDoc(docRef));
       return true;
     } catch (e) {
-      console.error("Erro ao excluir no Firebase: ", e);
-      return deleteLocalRecord(id);
+      console.warn("Erro ao excluir no Firebase: ", e.message);
+      return deleteScoreRecordLocal(id);
     }
   } else {
     return deleteScoreRecordLocal(id);
+  }
+};
+
+/**
+ * Apaga TODOS os registros do ranking (Apenas Admin)
+ */
+export const clearAllScores = async () => {
+  if (isFirebaseActive) {
+    try {
+      const querySnapshot = await withTimeout(getDocs(collection(db, "ranking")));
+      const deletions = querySnapshot.docs.map(d => withTimeout(deleteDoc(doc(db, "ranking", d.id))));
+      await Promise.all(deletions);
+      return true;
+    } catch (e) {
+      console.warn("Erro ao limpar ranking no Firebase: ", e.message);
+      localStorage.setItem("quiz_ranking", JSON.stringify([]));
+      return true;
+    }
+  } else {
+    localStorage.setItem("quiz_ranking", JSON.stringify([]));
+    return true;
   }
 };
 

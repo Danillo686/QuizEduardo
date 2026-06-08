@@ -179,7 +179,9 @@ export default function QuizScreen({ userName, userClass, userRole, onQuizComple
       setShowHint(false);
     } else {
       clearInterval(timerRef.current);
-      onQuizComplete({ score: isCorrect ? score : score, timeTaken });
+      // isCorrect reflects the last answer; score state may not yet include it
+      const finalScore = isCorrect ? score + 1 : score;
+      onQuizComplete({ score: finalScore, timeTaken });
     }
   };
 

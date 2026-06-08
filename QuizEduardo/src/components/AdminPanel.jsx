@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Users, Eye, Edit2, Trash2, X, Save, Check, RefreshCw } from 'lucide-react';
-import { getTopScores, getAccessCount, updateScoreRecord, deleteScoreRecord } from '../firebase';
+import { Shield, Users, Eye, Edit2, Trash2, X, Save, Check, RefreshCw, AlertTriangle } from 'lucide-react';
+import { getTopScores, getAccessCount, updateScoreRecord, deleteScoreRecord, clearAllScores } from '../firebase';
 
 export default function AdminPanel({ onClose }) {
   const [scores, setScores]           = useState([]);
   const [accessCount, setAccessCount] = useState(0);
   const [loading, setLoading]         = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
   const [editingRecord, setEditingRecord] = useState(null);
   const [editName, setEditName]       = useState('');
   const [editClass, setEditClass]     = useState('');
   const [editScore, setEditScore]     = useState(0);
   const [editTime, setEditTime]       = useState(0);
   const [deletingId, setDeletingId]   = useState(null);
-  const [toast, setToast]             = useState('');
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [toast, setToast]             = useState({ msg: '', type: 'success' });
 
   const load = async () => {
     setLoading(true);
@@ -26,9 +28,9 @@ export default function AdminPanel({ onClose }) {
 
   useEffect(() => { load(); }, []);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(''), 3000);
+  const showToast = (msg, type = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast({ msg: '', type: 'success' }), 3500);
   };
 
   const openEdit = (r) => {
@@ -41,30 +43,61 @@ export default function AdminPanel({ onClose }) {
 
   const saveEdit = async () => {
     if (!editName.trim()) return;
-    setLoading(true);
+    setActionLoading(true);
     try {
-      await updateScoreRecord(editingRecord.id, {
+      const ok = await updateScoreRecord(editingRecord.id, {
         name: editName.trim(),
         class: editingRecord.role === 'aluno' ? editClass.trim() : '',
         score: parseInt(editScore, 10),
         timeTaken: parseFloat(editTime),
       });
-      showToast('Registro atualizado com sucesso!');
-      setEditingRecord(null);
-      await load();
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
+      if (ok) {
+        showToast('Registro atualizado com sucesso!');
+        setEditingRecord(null);
+        await load();
+      } else {
+        showToast('Falha ao atualizar. Tente novamente.', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao atualizar registro.', 'error');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const confirmDelete = async (id) => {
-    setLoading(true);
+    setActionLoading(true);
     try {
-      await deleteScoreRecord(id);
-      showToast('Registro excluído com sucesso!');
-      setDeletingId(null);
+      const ok = await deleteScoreRecord(id);
+      if (ok) {
+        showToast('Registro excluído com sucesso!');
+        setDeletingId(null);
+        await load();
+      } else {
+        showToast('Falha ao excluir. Tente novamente.', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao excluir registro.', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const confirmClearAll = async () => {
+    setActionLoading(true);
+    try {
+      await clearAllScores();
+      showToast('Ranking limpo com sucesso!');
+      setShowClearConfirm(false);
       await load();
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
+    } catch (e) {
+      console.error(e);
+      showToast('Erro ao limpar ranking.', 'error');
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const fmtTime = (s) => {
@@ -117,9 +150,21 @@ export default function AdminPanel({ onClose }) {
         <h3 style={{ fontSize:'1rem', fontWeight:700, color:'var(--text-secondary)' }}>
           Registros de Pontuações
         </h3>
-        <button className="btn-icon" onClick={load} disabled={loading} title="Recarregar">
-          <RefreshCw size={14} className={loading ? 'spin-anim' : ''} />
-        </button>
+        <div style={{ display:'flex', gap:'0.5rem' }}>
+          <button
+            className="btn btn-danger"
+            onClick={() => setShowClearConfirm(true)}
+            disabled={actionLoading || scores.length === 0}
+            title="Apagar todo o ranking"
+            id="btn-admin-clear-rank"
+            style={{ fontSize:'0.8rem', padding:'0.35rem 0.8rem', display:'flex', alignItems:'center', gap:'0.4rem' }}
+          >
+            <Trash2 size={13} /> Limpar Rank
+          </button>
+          <button className="btn-icon" onClick={load} disabled={loading} title="Recarregar">
+            <RefreshCw size={14} className={loading ? 'spin-anim' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* Table */}
@@ -132,7 +177,7 @@ export default function AdminPanel({ onClose }) {
           <p>Nenhum jogador registrado ainda.</p>
         </div>
       ) : (
-        <div className="table-wrapper">
+        <div className="table-wrapper" style={{ opacity: actionLoading ? 0.6 : 1, pointerEvents: actionLoading ? 'none' : 'auto', transition: 'opacity 0.2s' }}>
           <table className="rank-table">
             <thead>
               <tr>
@@ -182,7 +227,7 @@ export default function AdminPanel({ onClose }) {
         </div>
       )}
 
-      <button className="btn btn-secondary" onClick={onClose} id="btn-admin-bottom-close">
+      <button className="btn btn-secondary" onClick={onClose} id="btn-admin-bottom-close" style={{ marginTop:'1.5rem' }}>
         <X size={15} /> Fechar Painel Admin
       </button>
 
@@ -220,11 +265,12 @@ export default function AdminPanel({ onClose }) {
             </div>
 
             <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setEditingRecord(null)}>
+              <button className="btn btn-secondary" onClick={() => setEditingRecord(null)} disabled={actionLoading}>
                 Cancelar
               </button>
-              <button className="btn btn-primary" onClick={saveEdit} id="btn-edit-save">
-                <Save size={15} /> Salvar Alterações
+              <button className="btn btn-primary" onClick={saveEdit} id="btn-edit-save" disabled={actionLoading}>
+                {actionLoading ? <RefreshCw size={14} className="spin-anim" /> : <Save size={15} />}
+                {actionLoading ? 'Salvando…' : 'Salvar Alterações'}
               </button>
             </div>
           </div>
@@ -242,11 +288,36 @@ export default function AdminPanel({ onClose }) {
               Tem certeza que deseja apagar permanentemente este registro do ranking global? Esta ação é irreversível.
             </p>
             <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setDeletingId(null)}>
+              <button className="btn btn-secondary" onClick={() => setDeletingId(null)} disabled={actionLoading}>
                 Cancelar
               </button>
-              <button className="btn btn-danger" onClick={() => confirmDelete(deletingId)} id="btn-delete-confirm">
-                <Trash2 size={15} /> Confirmar Exclusão
+              <button className="btn btn-danger" onClick={() => confirmDelete(deletingId)} id="btn-delete-confirm" disabled={actionLoading}>
+                {actionLoading ? <RefreshCw size={14} className="spin-anim" /> : <Trash2 size={15} />}
+                {actionLoading ? 'Excluindo…' : 'Confirmar Exclusão'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── CLEAR ALL CONFIRM MODAL ── */}
+      {showClearConfirm && (
+        <div className="modal-overlay">
+          <div className="modal-box" style={{ maxWidth: 460 }}>
+            <h3 className="modal-title" style={{ color:'var(--error)' }}>
+              <AlertTriangle size={18} /> Limpar Ranking Completo
+            </h3>
+            <p style={{ color:'var(--text-secondary)', fontFamily:'var(--font-secondary)', fontSize:'0.9rem', lineHeight:1.6 }}>
+              Isso vai <strong>apagar permanentemente TODOS os {scores.length} registros</strong> do ranking global.
+              Esta ação não pode ser desfeita!
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-secondary" onClick={() => setShowClearConfirm(false)} disabled={actionLoading}>
+                Cancelar
+              </button>
+              <button className="btn btn-danger" onClick={confirmClearAll} id="btn-clear-rank-confirm" disabled={actionLoading}>
+                {actionLoading ? <RefreshCw size={14} className="spin-anim" /> : <AlertTriangle size={15} />}
+                {actionLoading ? 'Limpando…' : 'Sim, Limpar Tudo'}
               </button>
             </div>
           </div>
@@ -254,10 +325,13 @@ export default function AdminPanel({ onClose }) {
       )}
 
       {/* ── TOAST ── */}
-      {toast && (
-        <div className="toast">
-          <Check className="toast-icon" size={18} />
-          <span className="toast-text">{toast}</span>
+      {toast.msg && (
+        <div className="toast" style={toast.type === 'error' ? { background:'var(--error)', borderColor:'var(--error-border)' } : {}}>
+          {toast.type === 'error'
+            ? <AlertTriangle className="toast-icon" size={18} />
+            : <Check className="toast-icon" size={18} />
+          }
+          <span className="toast-text">{toast.msg}</span>
         </div>
       )}
     </div>
