@@ -289,8 +289,8 @@ export const subscribeToTopScores = (callback) => {
     return () => {}; // no-op unsubscribe
   }
 
-  // Tenta a query com índice composto (score desc + timeTaken asc)
-  const buildResults = (snapshot) => {
+  // Função auxiliar para construir e ordenar resultados consistentemente
+  const buildAndSortResults = (snapshot) => {
     const results = [];
     snapshot.forEach((d) => {
       const data = d.data();
@@ -300,8 +300,17 @@ export const subscribeToTopScores = (callback) => {
         createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt
       });
     });
+    // SEMPRE ordena por score (desc) e depois por timeTaken (asc) para garantir consistência
+    results.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return (a.timeTaken ?? Infinity) - (b.timeTaken ?? Infinity);
+    });
     return results;
   };
+
+  let unsubscribeFallback = null;
 
   try {
     const q = query(
@@ -314,13 +323,13 @@ export const subscribeToTopScores = (callback) => {
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const results = buildResults(snapshot);
-        console.log(`🔴 Ranking atualizado em tempo real: ${results.length} registros`);
+        const results = buildAndSortResults(snapshot);
+        console.log(`✅ Ranking atualizado em tempo real (índice composto): ${results.length} registros`);
         callback(results);
       },
       (error) => {
         // Índice composto ausente — tenta query mais simples com onSnapshot
-        console.warn("⚠️ onSnapshot com índice composto falhou. Tentando sem timeTaken...", error.message);
+        console.warn("⚠️ Índice composto não disponível. Usando fallback com ordenação local...", error.message);
 
         try {
           const q2 = query(
@@ -328,28 +337,51 @@ export const subscribeToTopScores = (callback) => {
             orderBy("score", "desc"),
             limit(500)
           );
-          return onSnapshot(
+          
+          unsubscribeFallback = onSnapshot(
             q2,
             (snapshot2) => {
-              const results2 = buildResults(snapshot2);
-              results2.sort((a, b) =>
-                b.score !== a.score ? b.score - a.score : (a.timeTaken ?? Infinity) - (b.timeTaken ?? Infinity)
-              );
+              const results2 = buildAndSortResults(snapshot2);
+              console.log(`✅ Ranking atualizado em tempo real (fallback): ${results2.length} registros`);
               callback(results2);
             },
             (err2) => {
-              console.error("❌ onSnapshot falhou totalmente:", err2.message);
-              callback(getLocalScores().slice(0, 500));
+              console.error("❌ Fallback com score desc falhou. Usando sem orderBy...", err2.message);
+              try {
+                // Último fallback: busca todos sem ordenação no servidor
+                const q3 = query(collection(db, "ranking"), limit(500));
+                unsubscribeFallback = onSnapshot(
+                  q3,
+                  (snapshot3) => {
+                    const results3 = buildAndSortResults(snapshot3);
+                    console.log(`✅ Ranking atualizado (sem índice): ${results3.length} registros`);
+                    callback(results3);
+                  },
+                  (err3) => {
+                    console.error("❌ Todas as queries de ranking falharam:", err3.message);
+                    callback(getLocalScores().slice(0, 500));
+                  }
+                );
+              } catch (e3) {
+                console.error("❌ Erro ao criar listener de fallback:", e3.message);
+                callback(getLocalScores().slice(0, 500));
+              }
             }
           );
         } catch (e) {
+          console.error("❌ Erro ao criar listener fallback:", e.message);
           callback(getLocalScores().slice(0, 500));
-          return () => {};
         }
       }
     );
 
-    return unsubscribe;
+    // Retorna uma função que desinscreve do listener apropriado
+    return () => {
+      unsubscribe();
+      if (unsubscribeFallback) {
+        unsubscribeFallback();
+      }
+    };
   } catch (e) {
     console.error("❌ Erro ao criar listener do ranking:", e.message);
     callback(getLocalScores().slice(0, 500));
