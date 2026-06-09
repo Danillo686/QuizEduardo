@@ -226,6 +226,11 @@ export const clearRanking = async () => {
 };
 
 /**
+ * Alias para clearRanking (para compatibilidade com AdminPanel)
+ */
+export const clearAllScores = clearRanking;
+
+/**
  * Incrementa o contador de acessos
  */
 export const incrementAccessCount = async () => {
